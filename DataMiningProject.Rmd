@@ -1,0 +1,730 @@
+---
+title: 'Data Mining Project: Assessing National Economic Characteristics'
+author: "Derek Wagner"
+date: "11/18/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(openxlsx)
+library(ggplot2)
+library(mice)
+library(class)
+library(caret)
+library(xgboost)
+library(nnet)
+library(cluster)
+library(factoextra)
+library(kableExtra)
+```
+
+## Introduction
+
+In international relations, democratic peace theory (DPT) is a proposed paradigm for understanding the effect of government structure upon the decisions made by states with regard to going to war. According to DPT, democracies tend not to go to war with other democracies due to shared values and participatory government, which cause their constituencies to favor non-violent interactions between each other. General points of evidence used to demonstrate DPT are the relationships between post-WWII democracies such as the United States, EU member states, Japan, South Korea, Australia, Brazil, Israel, and others. Armed conflict between these democracies has not occurred since WWII, despite historical records that include much inter-state warfare between them. Advocates of DPT assert that it is the democratic norms between these states that have brought peace.
+
+However, DPT has been challenged by many political theorists and has fallen out of favor in recent times. Many assert that effects that had been attributed to DPT are actually the effects of separate simultaneous developments that have occurred in the process of globalization in the postwar era. Mousseau (2013) demonstrates that there is no statistically significant relationship between mutual democratic governance and conflict avoidance and instead argues that it is "contract-intensive" economic relationships between countries that prevent war. This proposition, however, has been darkened by the conflict between Russia and Ukraine, two countries that previously had close economic ties until the 2014 "Revolution of Dignity" in Ukraine and subsequent aggression by Russia. 
+
+The aim of this paper is to begin an investigation into the preconditions of democratic or economic peace theories; that is, the relationship between national economic indicators and governance structure. Acemoglu and Robinson (2006) argue that economic factors serve as precursors to governance structure. Based on this assertion, the ambition of this paper is to predict the government type of states using economic indicator data. K-nearest-neighbors, multinomial logistic regression, and boosted tree classification are all used to investigate the relationship between economics and government type.
+
+## Data Sources
+
+Two sources of economic indicator data are used in this analysis. The first is the World Bank Global Economic Monitor (GEM). The GEM dataset contains information about exchange rates, GDP, unemployment, consumer price indexes (CPI), stock markets, and other economic indicators for independent states. However, the GEM dataset has a high number of missing values. Data imputation will be used in this report to remedy the missing value problem, and the success of imputation will be assessed. Data from 2013 is the most complete in the dataset, so the analysis will focus only on 2013 GEM data. The data used in this study were downloaded from Kaggle.
+
+The second source of data is the International Monetary Fund (IMF) World Economic Outlook Database (WEO). The WEO dataset has similar predictors as the GEM dataset, though it has inflation rate and population data absent in the GEM dataset and lacks information about stocks and CPI. A strength of this dataset relative to the GEM dataset is the relative lack of missing values. Data from 2020 is used to maximize completeness. The data used in this study were downloaded from the IMF website.
+
+For the "Government" response variable, official government structure was considered first. However, as many authoritarian states are "officially" republics with democratic institutions, it was determined that official government structure was merely nominal and would not provide sufficient information about the presence of democracy in a country. Instead, the Freedom House "Global Freedom Score" was chosen as the response variable. Freedom House is a non-governmental organization that advocates for democratic governance worldwide and tracks indicators of democracy by country. The Global Freedom Score is Freedom House's index of how free and democratic each country is. A potential validity concern is the subjectivity with which a pro-democracy, Western organization may judge the democratic merits of assessed states; however, given the preceding discussion of democratic peace theory, it would be consistent to use the definition of democracy given by advocates of democracy for this analysis.
+
+A primary challenge of this analysis is the size of the data. For each given year, a maximum of 188 GEM observations and 110 complete IMF observations are available. Due to correlation between data across different years, cross-validation was initially attempted using each available year as a fold; however, no apparent improvement in performance was observed, and thus only the individual years with the most complete data for each dataset were chosen. The small sample sizes allow for an investigation of the efficacy of the studied methods in a small-$n$ setting. These small datasets were selected after data sparsity in a large-$n$ ($\sim 190,000$) World Bank dataset rendered it unusable.
+
+```{r echo=F}
+## IMF Data
+
+# Read in IMF data
+df_imf = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/WEO_data.xlsx")
+df_imf = df_imf%>%pivot_longer(cols=c("2019","2020","2021","2022"), names_to = "Year", values_to = "Value")%>%
+  pivot_wider(id_cols = c(Country, Year), names_from = Subject.Descriptor, values_from = Value)
+```
+```{r echo=F}
+# Key to match country names to FH labels
+countries_key = read.csv("C:/Users/wagnedg1/Documents/EP/countries_key.csv")
+```
+```{r echo=F}
+# Join IMF data to FH labels
+df_imf = df_imf%>%left_join(countries_key, by=c("Country"="IMF"))%>%
+  filter(Government!="")
+colnames(df_imf) = gsub(" ", "_", colnames(df_imf))
+colnames(df_imf) = gsub(",", "", colnames(df_imf))
+```
+
+
+```{r echo=F}
+## World Bank Data
+## Data are in multiple spreadsheets; must all be read in and appended
+df_1 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Core CPI, seas. adj..xlsx")
+rownames(df_1) <- df_1[,1]
+df_1[,1] <- NULL
+df_1 <- df_1[-1,]
+df_1 <- df_1%>%filter(row.names(df_1) == 2013)
+
+df_2 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/CPI Price, seas. adj..xlsx")
+rownames(df_2) <- df_2[,1]
+df_2[,1] <- NULL
+df_2 <- df_2[-1,]
+df_2 <- df_2%>%filter(row.names(df_2) == 2013)
+
+df_3 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Emerging Market Bond Index (JPM Total Return Index).xlsx")
+rownames(df_3) <- df_3[,1]
+df_3[,1] <- NULL
+df_3 <- df_3[-1,]
+df_3 <- df_3%>%filter(row.names(df_3) == 2013)
+
+df_4 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Exchange rate, new LCU per USD extended backward, period average.xlsx")
+rownames(df_4) <- df_4[,1]
+df_4[,1] <- NULL
+df_4 <- df_4[-1,]
+df_4 <- df_4%>%filter(row.names(df_4) == 2013)
+
+df_5 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/GDP at market prices, constant 2010 US$, millions, seas. adj..xlsx")
+rownames(df_5) <- df_5[,1]
+df_5[,1] <- NULL
+df_5 <- df_5[-1,]
+df_5 <- df_5%>%filter(row.names(df_5) == 2013)
+
+df_6 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Imports Merchandise, Customs, constant 2010 US$, millions, seas. adj..xlsx")
+rownames(df_6) <- df_6[,1]
+df_6[,1] <- NULL
+df_6 <- df_6[-1,]
+df_6 <- df_6%>%filter(row.names(df_6) == 2013)
+
+df_7 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Industrial Production, constant 2010 US$, seas. adj..xlsx")
+rownames(df_7) <- df_7[,1]
+df_7[,1] <- NULL
+df_7 <- df_7[-1,]
+df_7 <- df_7%>%filter(row.names(df_7) == 2013)
+
+df_8 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Retail Sales Volume Index, seas. adj..xlsx")
+rownames(df_8) <- df_8[,1]
+df_8[,1] <- NULL
+df_8 <- df_8[-1,]
+df_8 <- df_8%>%filter(row.names(df_8) == 2013)
+
+df_9 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Stock Markets, US$.xlsx")
+rownames(df_9) <- df_9[,1]
+df_9[,1] <- NULL
+df_9 <- df_9[-1,]
+df_9 <- df_9%>%filter(row.names(df_9) == 2013)
+
+df_10 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Total Reserves.xlsx")
+rownames(df_10) <- df_10[,1]
+df_10[,1] <- NULL
+df_10 <- df_10[-1,]
+df_10 <- df_10%>%filter(row.names(df_10) == 2013)
+
+df_11 = readWorkbook("C:/Users/wagnedg1/Documents/EP/DataMiningDataset/Unemployment Rate, seas. adj..xlsx")
+rownames(df_11) <- df_11[,1]
+df_11[,1] <- NULL
+df_11 <- df_11[-1,]
+df_11 <- df_11%>%filter(row.names(df_11) == 2013)
+
+df = plyr::rbind.fill(df_1,df_2,df_3,df_4,df_5,df_6,df_7,df_8,df_9,df_10,df_11)
+df['Metric'] = c("Core_CPI","CPI_Price","EMBI","Exchange_Rate","GDP_at_Market_Prices","Imports_Merchandise","Industrial_Production","RSVI","Stock_Markets","Total_Reserves","Unemployment")
+```
+
+```{r echo=F}
+# Transpose dataframe to make predictors the columns
+df = as.data.frame(t(df))
+colnames(df) = df[203,]
+df = df[-203,]
+df <- df %>% mutate_if(is.character, as.numeric)
+```
+
+```{r echo=F}
+## Take log of data
+df_wb = log(df)
+## Remove summary group observations
+row.names.remove = c("World.(WBG.members)", "Sub-Saharan.Africa.developing","South.Asia.developing","High.Income:.Non-OECD","Middle.East.&.N..Africa.developing","Middle-Income.Countries.(MIC)","Low-Income.Countries.(LIC)","Latin.America.&.Caribbean.developing", "High.income:.OECD","High.Income.Countries","Europe.&.Central.Asia.developing","East.Asia.&.Pacific.developing","Developing.Countries","Developing.Asia")
+df_wb = df_wb[!(row.names(df_wb) %in% row.names.remove), ]
+```
+
+## Data Preparation
+
+### Data Imputation
+
+The World Bank data contain a high proportion of missing values in all columns. To render the data usable for analysis, missing values were imputed using the `mice` package in R, which stands for Multivariate Imputation via Chained Equations. The assumption behind this method is that missing values are randomly distributed and will follow the same underlying distribution as the observed values. For this analysis, the MICE method chosen was to use classification and regression trees, which are themselves machine learning methods, to predict values of the missing data and impute the predicted values into the dataset. 
+
+```{r eval=F, echo=F, warning=F, message=F}
+# Impute data with MICE
+df_wb_imputed = data.frame(
+  `CPI_Price` = complete(mice(df_wb, method="cart"))$`CPI_Price`,
+  `Core_CPI` = complete(mice(df_wb, method="cart"))$`Core_CPI`,
+  `EMBI` = complete(mice(df_wb, method="cart"))$`EMBI`,
+  `Exchange_Rate` = complete(mice(df_wb, method="cart"))$`Exchange_Rate`,
+  `GDP_at_Market_Prices` = complete(mice(df_wb, method="cart"))$`GDP_at_Market_Prices`,
+  `Imports_Merchandise` = complete(mice(df_wb, method="cart"))$`Imports_Merchandise`,
+  `Industrial_Production` = complete(mice(df_wb, method="cart"))$`Industrial_Production`,
+  `RSVI` = complete(mice(df_wb, method="cart"))$`RSVI`,
+  `Stock_Markets` = complete(mice(df_wb, method="cart"))$`Stock_Markets`,
+  `Total_Reserves` = complete(mice(df_wb, method="cart"))$`Total_Reserves`,
+  `Unemployment` = complete(mice(df_wb, method="cart"))$`Unemployment`
+)
+```
+
+```{r eval=F, echo=F}
+df_wb_imputed['Country'] = rownames(df_wb)
+df_wb_imputed = df_wb_imputed%>%left_join(countries_key, by=c("Country"="World_Bank"))%>%
+  filter(Government!="")
+write.csv(df_wb_imputed,"C:/Users/wagnedg1/Documents/EP/df_imputed_wGov.csv")
+```
+
+```{r echo=F}
+df_wb_imp = read.csv("C:/Users/wagnedg1/Documents/EP/df_imputed_wGov.csv")
+df_wb_imp = df_wb_imp%>%select(-c( IMF, X))%>%rename("World_Bank"="Country")
+```
+
+
+### Data Scaling
+
+An important pre-processing step to prepare for machine learning is data scaling. Scaling is when data are transformed to be on similar scales (hence the name). Scaling improves the efficiency of machine learning techniques, particularly those that are highly dependent on distance metrics, such as *k*-means clustering. Predictors with widely different ranges can lead to distance metrics overweighting the predictors with the larger scales.
+
+The scaling method selected for this study is standardization. Standardization converts the data to standard normal variables, or $z$-scores. Standardization is preferred for predictors that already follow roughly Gaussian distributions; most of the predictors in the World Bank data look for or less normal after log scaling. This is also true for the IMF data with the exception of a number of outliers; this ends up reflected in the results later in this paper.
+
+
+## Exploratory Analysis: *k*-Means Clustering
+
+Freedom House generally classifies countries as being at one of three freedom levels: "Free", "Partly Free", and "Not Free". Thus, the first investigative task of this report is to conduct an unsupervised analysis of the data to see if the economic characteristics of states naturally group them in such a manner that resembles the grouping by Freedom House. The method chosen to do this is *k*-means clustering, using the `cluster` package in R. The basic principle of *k*-means clustering is that data are grouped into *k* groups in such a way that optimizes some distance metric between the observed data and the centers of the groups. For each dataset, *k*-means clustering is run with varying *k*; however, only that *k* which best balances between class exclusivity and size of *k* is selected.
+
+The results of *k*-means clustering are presented using principal components analysis (PCA), a dimensionality reduction technique. As there are 11 predictors in the World Bank data and 13 predictors in the IMF data, visualizing the clusters in such high-dimensional space is impossible. Instead, data are plotted by the two principal components that capture the most variability in the data. This is an imperfect projection, but if the top two principal components capture a large amount of the variability, then the projection is more illustrative of the class boundaries.
+
+### Clustering: World Bank Data
+
+The figure below shows three clusters calculated for the World Bank data plotted by the first two principal components, which together account for 36.4% of the variability of the data. Clusters 1 and 3 demonstrate no overlap, while there is some minor overlap between clusters 2 and 3. Clustering with $>3$ clusters led to high overlap between clusters, so $k=3$ is selected as optimal. This is convenient, as Freedom House also uses three groups.
+
+```{r echo=F, message=F}
+df_wb_clustering = read.csv("C:/Users/wagnedg1/Documents/EP/df_imputed_wGov.csv")
+df_wb_clustering = df_wb_clustering%>%select(-c(IMF,X))
+df_wb_clustering_scaled = scale(df_wb_clustering%>%
+                              select(-c(Government, Country))%>%
+                              mutate_if(is.character, as.numeric))
+rownames(df_wb_clustering_scaled) <- df_wb_clustering[,12]
+wb_clusters = kmeans(df_wb_clustering_scaled, centers = 3, nstart = 100)
+fviz_cluster(wb_clusters, data = df_wb_clustering_scaled, geom="point", main="Clusters for World Bank Data")
+df_wb_clustering_scaled = as.data.frame(df_wb_clustering_scaled)%>%
+  mutate(cluster = as.vector(wb_clusters$cluster))
+```
+
+However, the tables below show that the states are not grouped by governance type.
+
+```{r echo=F, warning=F, message=F}
+df_wb_clustering_scaled['Country'] = rownames(df_wb_clustering_scaled)
+df_wb_clusters = df_wb_clustering_scaled%>%select(Country, cluster)
+df_wb_clusters['Government'] = df_wb_clustering['Government']
+kable(df_wb_clusters%>%filter(cluster==1)%>%pivot_wider(names_from="cluster",values_from = "Country")) %>% 
+  kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
+kable(df_wb_clusters%>%filter(cluster==2)%>%pivot_wider(names_from="cluster",values_from = "Country")) %>% 
+  kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
+kable(df_wb_clusters%>%filter(cluster==3)%>%pivot_wider(names_from="cluster",values_from = "Country")) %>% 
+  kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
+```
+
+Clusters 1 and 3 do have outsized proportions of "Not Free" states, while Cluster 2 is relatively evenly distributed. Nevertheless, it does not appear like unsupervised methods alone will be able to sort states the way that Freedom House does. However, the possibility of economic indicators being able to predict governance type will not be abandoned yet, as supervised methods will be tried. First, however, *k*-means clustering is used on the IMF data.
+
+### IMF Data
+
+Attempting *k=3*-means clustering with the IMF data immediately shows the evidence of the outlier issues identified during data pre-processing. The figure below shows two clusters located very close to one another with a third, one-country cluster in the bottom-right.
+
+```{r echo=F}
+df_imf_clustering = data.frame(na.omit(df_imf%>%filter(Year==2020)%>%
+  select(-c(Year, World_Bank)))%>%
+  filter(Population!="n/a"))
+df_imf_clustering_scaled = scale(df_imf_clustering%>%
+                              select(-c(Government, Country))%>%
+                              mutate_if(is.character, as.numeric))
+rownames(df_imf_clustering_scaled) <- df_imf_clustering[,1]
+imf_clusters = kmeans(df_imf_clustering_scaled, centers = 3, nstart = 100)
+fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point")
+```
+
+The only country in the lonely cluster is Brazil, which is a clear outlier compared to the rest of the dataset. Thus, the clustering is re-run with Brazil excluded:
+
+```{r echo=F}
+df_imf_clustering = data.frame(na.omit(df_imf%>%filter(Year==2020)%>%filter(!Country%in%c("Brazil"))%>%
+  select(-c(Year, World_Bank)))%>%
+  filter(Population!="n/a"))
+df_imf_clustering_scaled = scale(df_imf_clustering%>%
+                              select(-c(Government, Country))%>%
+                              mutate_if(is.character, as.numeric))
+rownames(df_imf_clustering_scaled) <- df_imf_clustering[,1]
+imf_clusters = kmeans(df_imf_clustering_scaled, centers = 3, nstart = 100)
+fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point")
+```
+
+Again, an outlier appears; this time, it is Ukraine. This occurs one more time as well (not shown) with Moldova, and then a small outlier cluster of Tajikistan, Yemen, Guinea, and the Democratic Republic of the Congo also shows disruptive outlier characteristics. Clustering is run one final time with all of these states excluded:
+
+```{r echo=F}
+df_imf_clustering = data.frame(na.omit(df_imf%>%filter(Year==2020)%>%filter(!Country%in%c("Brazil","Ukraine","Moldova",
+                                                                                          "Democratic Republic of the Congo",
+                                                                                          "Tajikistan","Yemen","Guinea"))%>%
+  select(-c(Year, World_Bank)))%>%
+  filter(Population!="n/a"))
+df_imf_clustering_scaled = scale(df_imf_clustering%>%
+                              select(-c(Government, Country))%>%
+                              mutate_if(is.character, as.numeric))
+rownames(df_imf_clustering_scaled) <- df_imf_clustering[,1]
+imf_clusters = kmeans(df_imf_clustering_scaled, centers = 3, nstart = 100)
+fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point")
+```
+
+The new clusters are more well-defined. The tables below show the distribution of governance types by cluster:
+
+\newpage
+
+```{r echo=F, warning=F, message=F}
+df_imf_clustering_scaled = as.data.frame(df_imf_clustering_scaled)
+df_imf_clustering_scaled['Country'] = rownames(df_imf_clustering_scaled)
+df_imf_clusters = df_imf_clustering_scaled%>%select(Country)%>%mutate(cluster = as.vector(imf_clusters$cluster))
+df_imf_clusters['Government'] = df_imf_clustering['Government']
+kable(df_imf_clusters%>%filter(cluster==1)%>%pivot_wider(names_from="cluster",values_from = "Country")) %>% 
+  kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
+kable(df_imf_clusters%>%filter(cluster==2)%>%pivot_wider(names_from="cluster",values_from = "Country")) %>% 
+  kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
+kable(df_imf_clusters%>%filter(cluster==3)%>%pivot_wider(names_from="cluster",values_from = "Country")) %>% 
+  kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
+```
+
+With the IMF data, considerably more success is seen in sorting the countries by governance type than with the World Bank data. 50% of countries in cluster 1 are "Free"; 43% of countries in Cluster 2 are "Not Free", and 85% are either "Not Free" or "Partly Free"; and three of the five countries in Cluster 3 are "Not Free". While this success rate is not thrilling, it shows that the Freedom House governance types are surely associated with the IMF economic indicators to some extent.
+
+\newpage
+
+## Supervised Investigation, Pt. 1: K-Nearest Neighbors
+
+The results of the previous section provide motivation to investigate the relationships between economic indicators and governance types. The first supervised learning method used in this study is the *K*-Nearest Neighbors (KNN) method. The KNN method, like *k*-means clustering, depends on distance metrics between points in the feature space; however, KNN is a supervised method that classifies a new observation based on the class memberships of the *K* nearest points in the training data. Thus, the number of classes is determined by the number of classes in the data, not passed to the algorithm by the analyst.
+
+For all of the supervised learning methods used in this paper, confusion matrices and performance metrics are reported. A confusion matrix is a matrix that displays the predicted classes of the test set data points compared to the actual classes of those points. The confusion matrices for three-class models has the following form:
+
+$$\begin{matrix} & \text{Reference} & & \\
+\text{Predicted} & \text{Class 1} & \text{Class 2} & \text{Class 3} \\
+\text{Class 1} & A & B & C \\
+\text{Class 2} & D & E & F \\
+\text{Class 3} & G & H & I
+\end{matrix}$$
+
+The performance metrics reported follow the formulae below:
+
+Given that the class of interest is Class 1, 
+
+- Sensitivity $= A/(A+D+G)$
+- Specificity $= (E+F+H+I)/(B+C+E+F+H+I)$
+- Prevalence $= (A+D+G)/n$
+- Positive Predictive Value $= \frac{\text{Sens.}*\text{Prev.}}{(\text{Sens.}*\text{Prev.})+(1-\text{Spec.})*(1-\text{Prev.}))}$
+- Negative Predictive Value $= \frac{\text{Spec.}*(1-\text{Prev.})}{((1-\text{Sens.})*\text{Prev.})+\text{Spec.}*(1-\text{Prev.}))}$
+- Detection Rate $= A/n$
+- Detection Prevalence $= (A+B+C)/n$
+- Balanced Accuracy $= \frac{\text{Sens.}+\text{Spec.}}{2}$
+
+The metrics of greatest interest for this study are sensitivity, specificity, positive predictive value, and balanced accuracy. Sensitivity is the proportion of actual members of a class that are predicted to be of that class. Specificity is the proportion of non-members of a class that are predicted to not be of that class. Positive predictive value is the proportion of predictions of the target class that actually are of that target class. Balanced accuracy is the simple average of sensitivity and specificity.
+
+### World Bank Data, With Imputed Data
+
+The World Bank dataset, with imputed and scaled data, is used for KNN first. 70% of the dataset is used for training the KNN classified, while the remaining 30% is used as the test set. The optimal $K$ is found to be $K=5$, and results are reported as such.
+
+
+```{r echo=F}
+# Set seed for consistent train/test split
+set.seed(1)
+
+# Scaling
+df_wb_imp_scaled = scale(df_wb_imp%>%
+                              select(-c(Government, World_Bank))%>%
+                              mutate_if(is.character, as.numeric))
+df_wb_imp_scaled = cbind(df_wb_imp_scaled, df_wb_imp%>%select(c(Government, World_Bank)))
+# Train/test split
+sample <- sample(c(TRUE, FALSE), nrow(df_wb_imp_scaled), replace=TRUE, prob=c(0.7, .3))
+df_train_wb  <- df_wb_imp_scaled[sample, ]
+df_test_wb   <- df_wb_imp_scaled[!sample, ]
+```
+
+```{r echo=F}
+classifier_knn <- knn(train = df_train_wb%>%select(-c(Government, World_Bank)), 
+                      test = df_test_wb%>%select(-c(Government, World_Bank)), 
+                      cl = df_train_wb$Government, 
+                      k = 5) 
+```
+```{r echo=F}
+df_test_preds = df_test_wb%>%
+  mutate(prediction = classifier_knn)%>%
+  mutate(correct = case_when(
+    prediction == Government ~ 1,
+    prediction != Government ~ 0
+  ))
+
+confusion_mat = confusionMatrix(data=classifier_knn, reference=factor(df_test_wb$Government))
+confusion_mat
+```
+
+From the confusion matrix and performance metrics, it is observed that the "Not Free" class has the highest positive predictive value; that is, a model prediction of "Not Free" is more likely to actually belong to that class than model predictions of the other classes are to belong to those other classes. Low positive predictive value and specificity are observed for "Partly Free"; that is, the model over-assigns the "Partly Free" classification. The overall accuracy of 45.45% is quite poor, and the $p$-valus from comparing the accuracy to the largest class proportion (the "no information rate") fails to indicate usefulness of this model. These results are not unforeseen due to the results from unsupervised learning.
+
+### IMF Data
+
+Attention now turns to using KNN for the IMF data. The same outlier states omitted from *k*-means clustering are omitted here as well. The optimal $K$ is found to be $K=20$. The confusion matrix and performance metrics are reported below.
+
+```{r echo=F}
+df_imf_2020 = data.frame(na.omit(df_imf%>%filter(Year==2020)%>%filter(!Country%in%c("Brazil","Ukraine","Moldova",
+                                                                                          "Democratic Republic of the Congo",
+                                                                                          "Tajikistan","Yemen","Guinea"))%>%
+  select(-c(Year, World_Bank)))%>%
+  filter(Population!="n/a"))
+df_imf_2020_scaled = scale(df_imf_clustering%>%
+                              select(-c(Government, Country))%>%
+                              mutate_if(is.character, as.numeric))
+df_imf_2020_scaled = cbind(df_imf_2020_scaled, df_imf_2020%>%select(Government))
+```
+
+```{r echo=F}
+# Set seed for consistent train/test split
+set.seed(1)
+# Train/test split
+sample <- sample(c(TRUE, FALSE), nrow(df_imf_2020_scaled), replace=TRUE, prob=c(0.7, .3))
+df_train_imf  <- df_imf_2020_scaled[sample, ]
+df_test_imf   <- df_imf_2020_scaled[!sample, ]
+```
+
+```{r echo=F}
+set.seed(1)
+classifier_knn <- knn(train = df_train_imf%>%select(-Government), 
+                      test = df_test_imf%>%select(-Government), 
+                      cl = df_train_imf$Government, 
+                      k = 20) 
+```
+```{r echo=F}
+df_test_preds = df_test_imf%>%
+  mutate(prediction = classifier_knn)%>%
+  mutate(correct = case_when(
+    prediction == Government ~ 1,
+    prediction != Government ~ 0
+  ))
+
+confusion_mat = confusionMatrix(data=classifier_knn, reference=factor(df_test_imf$Government))
+confusion_mat
+```
+
+The most significant takeaway from the performance of KNN on the IMF data is that the model over-identifies observations as "Partly Free," as the positive predictive value for "Partly Free" was a poor 0.3929 despite very high sensitivity (0.9167). Meanwhile, sensitivity was very low for the other two classes. The overall accuracy of 0.4595 is higher than the no-information rate of 0.3784, but not within a statistically significant margin ($p=0.1974$). Thus, KNN does not provide models that can effectively predict governance type with the economic indicators. This finding is particularly surprising with the IMF data due to the earlier findings with the unsupervised method.
+
+## Supervised Investigation, Pt. 2: Ordered Logistic Regression
+
+The next method to be used is ordered (or ordinal) logistic regression. Ordered logistic regression is an extension of logistic regression to a ordinal response variable. The notion that the governance types given by Freedom House could be considered ordinal has not yet been discussed, but it is an important feature of the data. The three classes vary with respect to what Freedom House assesses as "amount of freedom," or the strength/absence of democratic norms and institutional behavior. Thus, it is logical to consider "Free", "Partly Free", and "Not Free" as ordinal on one shared scale of "freedom", rather than as three separate and unassociated types of governance.
+
+For an ordered logistic regression model with $J$ classes, where the order is such that $j_1 = 1 < 2 = j_2$, etc., the information of interest is $P(Y\le j)$, or the cumulative probability of an outcome $Y$ belonging to $j$ or one of the lesser categories. In the ordered logistic regression model, the log odds of being less than or equal to a category $j$ are:
+
+$$\text{log}\frac{P(Y\le j)}{P(Y > j)}=\text{logit}(P(Y\le j))=\beta_{j0}-\eta_1x_1-...-\eta_px_p$$
+
+where $p$ is the number of predictors, $\eta_i$ are the coefficients for the predictors, and $\beta_j0$ is the intercept for class $j$.
+
+The estimated effect of a predictor on the response can be quantified by the odds ratio. The odds ratio for a predictor expresses the ratio of the odds of an observation belonging to a particular class (or a lesser one) relative to those odds for another observation with an observed value that is one unit less in the predictor. If the odds ratio is equal to 1, then it is said that the odds of belonging to the class are equal; odds ratios greater than 1 mean that increases in the predictor increase the odds of belonging to the class, and the opposite is true for odds ratios less than 1. The odds ratio is found by simply exponentiating the coefficient estimate for a predictor. Confidence intervals are also reported for the odds ratios.
+
+### World Bank Data, with Imputed Data
+
+The odds ratios and associated 95% confidence intervals for ordered logistic regression on the imputed World Bank data are below.
+
+```{r echo=F, message=F}
+df_train_wb$Government = factor(df_train_wb$Government, levels=c("Free","Partly Free","Not Free"))
+df_test_wb$Government = factor(df_test_wb$Government, levels=c("Free","Partly Free","Not Free"))
+m_wb <- MASS::polr(Government~., data = df_train_wb%>%dplyr::select(-World_Bank), Hess=TRUE)
+## OR and CI
+ci <- confint(m_wb) # default method gives profiled CIs
+round(exp(cbind(OR = coef(m_wb), ci)), digits = 4)
+```
+
+From the resulting odds ratios, it is observed that only the `Exchange_Rate` variable has an odds ratios that is different from 1 at the $\alpha=0.05$ level. All of the other predictors appear to be extraneous. Nevertheless, the prediction results on the test data for the full model are shown below:
+
+```{r echo=F}
+pred_lr_wb = predict(object=m_wb, newdata = df_test_wb%>%dplyr::select(-World_Bank), type='class')
+confusion_mat = confusionMatrix(
+  data = pred_lr_wb,
+  reference = factor(df_test_wb$Government)
+)
+confusion_mat
+```
+
+Prediction performance is significantly improved relative to KNN, with overall accuracy at 0.6364, which is significantly different from the no-information rate at the $\alpha=0.05$ level. Sensitivity is particularly high for the "Partly Free" and "Not Free" classes, and specificity is above 0.75 for all three classes, leading to generally high balanced accuracies. While these are not exceptional results, they are quite good considering the low sample size and the volume of data imputation required for the World Bank dataset.
+
+While only `Exchange_Rate` was identified as having a significant effect on class membership, a model with only `Exchange_Rate` (not shown) resulted in poor accuracy (0.4545). Thus, the full model is preferred and provides some evidence that economic indicators, in aggregate, are associated with governance type.
+
+### IMF Data
+
+As seen in the odds ratios and performance metrics below, the ordered logistic regression does not work as well for the IMF dataset. During the running of the model, fitted probabilities that were numerically 0 or 1 occurred, which is a problem that could indicate the presence of outliers. However, this issue appeared to be related to a subset of the predictors, identified by having exceptionally wide confidence intervals for the odds ratios. After removing these predictors, the numerical issues were resolved; however, the resulting model had no improvements in performance. No feature was shown to be statistically significant per assessment of the odds ratios, and the model failed to identify any test set observations as "Not Free".
+
+```{r echo=F, message=F}
+rownames(df_train_imf) <- 1:nrow(df_train_imf)
+df_train_imf$Government = factor(df_train_imf$Government, levels=c("Free","Partly Free","Not Free"))
+df_test_imf$Government = factor(df_test_imf$Government, levels=c("Free","Partly Free","Not Free"))
+m_imf <- MASS::polr(Government~., data = df_train_imf%>%dplyr::select(-c(Inflation_average_consumer_prices, Inflation_end_of_period_consumer_prices,
+                                                                         Gross_domestic_product_deflator, Total_investment, Current_account_balance)), Hess=TRUE)
+## OR and CI
+ci <- confint.default(m_imf) # default method gives profiled CIs
+round(exp(cbind(OR = coef(m_imf), ci)), digits=4)
+```
+
+```{r echo=F}
+pred_lr_imf = predict(object=m_imf, newdata = df_test_imf, type='class')
+confusion_mat = confusionMatrix(
+  data = pred_lr_imf,
+  reference = factor(df_test_imf$Government)
+)
+confusion_mat
+```
+
+Ordered logistic regression was not the right technique for the IMF dataset; however, one more method is attempted in this study.
+
+## Supervised Investigation, Pt. 3: XGBoost
+
+The final supervised learning technique attempted is extreme gradient boosting, or "XGBoost." Boosting is an ensemble method that combines multiple models with poor prediction power ("weak" learners) to generate a model with strong prediction power (a "strong" learner). For XGBoost, decision trees are the weak learners. The trees are trained sequentially, where new trees are trained to predict the residuals of prior trees and are then combined to make the final predictions (XGBoost). The figure below illustrates how XGBoost works:
+
+<p>
+![Amazon Web Services Illustration of XGBoost](C:/Users/wagnedg1/Documents/EP/xgboost_illustration.png)
+</p>
+
+The algorithm works to minimize a regularization function that is based both on loss from misclassification and penalties for model complexity (AWS). 
+
+### World Bank Data, with Imputed Data
+
+The same training and test sets used for KNN and ordered logistic regression are used for XGBoost. The objective function is a multiclass "softprob" objective, meaning that a vector of probabilities of class membership is output for each observation. The evaluation metric is multiclass log-loss, given by the following formula (Scikit-Learn):
+
+$$L_{\text{log}}(Y,P) = -\text{log }\text{Pr}(Y|P) = -\frac{1}{N}\sum_{i=0}^{N-1}\sum_{k=0}^{K-1}y_{i,k}\text{log}p_{i,k}$$
+
+where $Y$ is a binary-indicator matrix indicating class membership for each observation with $y_{i,k}=1$ if observation $i$ has label $k$ from a set of $K$ labels, $P$ is a matrix of probability estimates with $p_{i,k}=\text{Pr}(y_{i,k}=1)$, and $N$ is the sample size (Scikit-Learn). It is a standard metric for evaluating multiclass classification predictions.
+
+For this part of the study, 5-fold cross-validation was used to identify the optimal XGBoost parameters. The optimal model is reported below.
+
+```{r echo=F, results='hide'}
+df_wb_imp_xgboost = df_wb_imp_scaled%>%dplyr::select(-World_Bank)
+df_wb_imp_xgboost$Government[df_wb_imp_xgboost$Government=="Free"] = 2
+df_wb_imp_xgboost$Government[df_wb_imp_xgboost$Government=="Partly Free"] = 1
+df_wb_imp_xgboost$Government[df_wb_imp_xgboost$Government=="Not Free"] = 0
+df_wb_imp_xgboost$Government = as.numeric(df_wb_imp_xgboost$Government)
+# Make split index
+train_index <- sample(1:nrow(df_wb_imp_xgboost), nrow(df_wb_imp_xgboost)*0.70)
+# Full data set
+data_variables <- as.matrix(df_wb_imp_xgboost[1:ncol(df_wb_imp_xgboost)-1])
+data_label <- df_wb_imp_xgboost[,"Government"]
+data_matrix <- xgb.DMatrix(data = as.matrix(df_wb_imp_xgboost), label = data_label)
+# split train data and make xgb.DMatrix
+train_data   <- data_variables[train_index,]
+train_label  <- data_label[train_index]
+train_matrix <- xgb.DMatrix(data = train_data, label = train_label)
+# split test data and make xgb.DMatrix
+test_data  <- data_variables[-train_index,]
+test_label <- data_label[-train_index]
+test_matrix <- xgb.DMatrix(data = test_data, label = test_label)
+```
+
+```{r echo=F, results='hide'}
+numClasses = length(unique(df_wb_imp_xgboost$Government))
+
+cv_model <- xgb.cv(params = list(
+  "objective" = "multi:softprob",
+  "eval_metric" = "mlogloss",
+  "num_class" = numClasses
+),
+                   data = train_matrix, 
+                   nrounds = 500,
+                   nfold = 5,
+                   verbose = FALSE,
+                   prediction = TRUE)
+
+```
+
+```{r, echo=F, results='hide'}
+OOF_prediction <- data.frame(cv_model$pred) %>%
+  mutate(max_prob = max.col(., ties.method = "last"),
+         label = train_label + 1)
+OOF_prediction$max_prob[OOF_prediction$max_prob==1] = "Not Free"
+OOF_prediction$max_prob[OOF_prediction$max_prob==2] = "Partly Free"
+OOF_prediction$max_prob[OOF_prediction$max_prob==3] = "Free"
+OOF_prediction$label[OOF_prediction$label==1] = "Not Free"
+OOF_prediction$label[OOF_prediction$label==2] = "Partly Free"
+OOF_prediction$label[OOF_prediction$label==3] = "Free"
+```
+
+```{r, echo=F, results='hide'}
+# confusion matrix
+confusionMatrix(factor(OOF_prediction$max_prob),
+                factor(OOF_prediction$label),
+                mode = "everything")
+```
+
+```{r echo=F}
+opt_model = xgb.train(params = list(
+  "objective" = "multi:softprob",
+  "eval_metric" = "mlogloss",
+  "num_class" = numClasses
+),
+                       data = train_matrix,
+                       nrounds = 500)
+
+# Predict hold-out test set
+test_pred <- predict(opt_model, newdata = test_matrix)
+test_prediction <- matrix(test_pred, nrow = numClasses,
+                          ncol=length(test_pred)/numClasses) %>%
+  t() %>%
+  data.frame() %>%
+  mutate(label = test_label + 1,
+         max_prob = max.col(., "last"))
+# confusion matrix of test set
+confusionMatrix(factor(test_prediction$max_prob),
+                factor(test_prediction$label),
+                mode = "everything")
+```
+
+Unfortunately, the performance of the XGBoost method for the World Bank data is not as good as that of the ordered logistic regression. The overall accuracy is only 0.4348, and positive predictive value and sensitivity are not high for any classes. It is most likely that the ordered logistic regression's specific suitability for ordinal classes is why it performed well when the usually-strong XGBoost method failed to do so.
+
+### IMF Data
+
+For the IMF data, the same procedure is followed. The results of out-of-fold prediction from cross-validation are reported first.
+
+```{r echo=F, results='hide'}
+df_imf_xgboost = df_imf_2020_scaled
+df_imf_xgboost$Government[df_imf_xgboost$Government=="Free"] = 2
+df_imf_xgboost$Government[df_imf_xgboost$Government=="Partly Free"] = 1
+df_imf_xgboost$Government[df_imf_xgboost$Government=="Not Free"] = 0
+df_imf_xgboost = df_imf_xgboost%>%mutate_if(is.character, as.numeric)
+  
+# Make split index
+train_index <- sample(1:nrow(df_imf_xgboost), nrow(df_imf_xgboost)*0.70)
+# Full data set
+data_variables <- as.matrix(df_imf_xgboost[1:ncol(df_imf_xgboost)-1])
+data_label <- as.vector(df_imf_xgboost[,"Government"])
+
+data_matrix <- xgb.DMatrix(data = as.matrix(df_imf_xgboost), label = data_label)
+# split train data and make xgb.DMatrix
+train_data   <- data_variables[train_index,]
+train_label  <- data_label[train_index]
+train_matrix <- xgb.DMatrix(data = train_data, label = train_label)
+# split test data and make xgb.DMatrix
+test_data  <- data_variables[-train_index,]
+test_label <- data_label[-train_index]
+test_matrix <- xgb.DMatrix(data = test_data, label = test_label)
+```
+
+```{r echo=F, results='hide'}
+numClasses = length(unique(df_imf$Government))
+
+cv_model <- xgb.cv(params = list(
+  "objective" = "multi:softprob",
+  "eval_metric" = "mlogloss",
+  "num_class" = numClasses,
+  "eta" = 0.1
+),
+                   data = train_matrix, 
+                   nrounds = 500,
+                   nfold = 5,
+                   verbose = FALSE,
+                   prediction = TRUE)
+
+```
+
+```{r echo=F, results='hide'}
+OOF_prediction <- data.frame(cv_model$pred) %>%
+  mutate(max_prob = max.col(., ties.method = "last"),
+         label = train_label + 1)
+OOF_prediction$max_prob[OOF_prediction$max_prob==1] = "Not Free"
+OOF_prediction$max_prob[OOF_prediction$max_prob==2] = "Partly Free"
+OOF_prediction$max_prob[OOF_prediction$max_prob==3] = "Free"
+OOF_prediction$label[OOF_prediction$label==1] = "Not Free"
+OOF_prediction$label[OOF_prediction$label==2] = "Partly Free"
+OOF_prediction$label[OOF_prediction$label==3] = "Free"
+```
+
+```{r echo=F}
+# confusion matrix
+confusionMatrix(factor(OOF_prediction$max_prob),
+                factor(OOF_prediction$label),
+                mode = "everything")
+```
+
+The results of cross-validation are consistent with the results of the *k*-means clustering from earlier in this report. The XGBoost model succeeded in classifying most of the "Free" countries, while it struggled to discriminate between "Partly Free" and "Not Free" countries. This corroborates the results of *k*-means clustering, where most of the "Free" countries were grouped into one cluster but another cluster had large numbers of both "Partly Free" and "Not Free" countries. 
+
+However, when the optimal model parameters are selected based on cross-validation and test set predictions are made, the performance (not displayed) is very poor; the accuracy is 0.3333, which is less than the no-information rate. XGBoost unfortunately did not work well for the IMF data, following the pattern of KNN and ordered logistic regression.
+
+```{r echo=F, results='hide'}
+opt_model = xgb.train(params = list(
+  "objective" = "multi:softprob",
+  "eval_metric" = "mlogloss",
+  "num_class" = numClasses,
+  "eta" = 0.1
+),
+                       data = train_matrix,
+                       nrounds = 500)
+
+# Predict hold-out test set
+test_pred <- predict(opt_model, newdata = test_matrix)
+test_prediction <- matrix(test_pred, nrow = numClasses,
+                          ncol=length(test_pred)/numClasses) %>%
+  t() %>%
+  data.frame() %>%
+  mutate(label = test_label + 1,
+         max_prob = max.col(., "last"))
+# confusion matrix of test set
+confusionMatrix(factor(test_prediction$max_prob),
+                factor(test_prediction$label),
+                mode = "everything")
+```
+
+## Discussion
+
+In this paper, supervised and unsupervised methods have been used to investigate the association between economic indicators and the type of governance in sovereign states. Economic data from both the World Bank and the International Monetary Fund were used for these predictions. Despite the problems with data sparsity in the World Bank data and small sample sizes in both datasets, some evidence was found to suggest that there do exist associations between economic factors and the level of democracy in states. These associations are not strong in any of the analyses, but they support the thesis that economic and political factors within and between states are interrelated. This may not be new ground in the field of international relations, but there is value in quantitative data that includes a wide variety of states, not only major economies as many analyses do. 
+
+Further research to put DPT to the test could use two-stage least squares (TSLS) to first decouple economic factors from political ones due to their likely association, followed by a regression with a measure of conflict. Operationalizing "conflict" is its own challenge beyond the scope of this analysis, but work has been done in the field (Raleigh and Kishi).
+
+## Code Reference
+
+The code used for the production of this report can be found at the following GitHub page: https://github.com/dgwagner/DataMiningFall2023
+
+\newpage
+
+## References
+
+| Acemoglu, D., &amp; Robinson, J. A. (2006). Economic origins of dictatorship and democracy. 
+|   Cambridge University Press. 
+
+| Amazon. (n.d.). Amazon SageMaker Developer Guide: How XGBoost Works. Amazon Web Services.
+|   https://docs.aws.amazon.com/sagemaker/latest/dg/xgboost-HowItWorks.html 
+
+| Boehmke, B. (n.d.). K-means cluster analysis. UC Business Analytics R Programming Guide. 
+|   https://uc-r.github.io/kmeans_clustering 
+
+| Harris, M. (n.d.). Multiclass Classification with XGBoost in R. RPubs. 
+|   https://rpubs.com/mharris/multiclass_xgboost 
+
+| International Monetary Fund. (n.d.). World Economic Outlook Database. International Monetary Fund.
+|   https://www.imf.org/en/Publications/WEO/weo-database/2023/April 
+
+| Mousseau, M. (2013). The Democratic Peace Unraveled: It’s the Economy. 
+|   International Studies Quarterly, 57(1), 186–197. http://www.jstor.org/stable/41804857
+
+| Radecic, D. (2023, January 10). Imputation in R: Top 3 ways for imputing missing data. 
+|   Appsilon. https://appsilon.com/imputation-in-r/ 
+
+| Raleigh, C., &amp; Kishi, K. (2023, October 10). ACLED conflict index. ACLED. 
+|   https://acleddata.com/acled-conflict-index-mid-year-update/ 
+
+| Scikit-learn developers. (n.d.). 3.3. Metrics and Scoring: 
+|   Quantifying the quality of predictions. Scikit-Learn. 
+|   https://scikit-learn.org/stable/modules/model_evaluation.html#log-loss 
+
+| UCLA Office of Advanced Research Computing. (n.d.). ORDINAL LOGISTIC REGRESSION - 
+|   R DATA ANALYSIS EXAMPLES. OARC Stats. 
+|   https://stats.oarc.ucla.edu/r/dae/ordinal-logistic-regression/ 
+
+| van Buuren, S. (n.d.). 3.5 Classification and regression trees. Flexible Imputation of Missing Data. 
+|   https://stefvanbuuren.name/fimd/sec-cart.html 
+
+| World Bank. (2019, May 16). Global Economic Monitor. Kaggle. 
+|   https://www.kaggle.com/datasets/theworldbank/global-economic-monitor/ 
+
+| XGBoost developers. (2022). XGBoost R Package. XGBoost R Package - xgboost 2.0.2 documentation.
+|   https://xgboost.readthedocs.io/en/stable/R-package/index.html 
+
+| YCharts. (2022, March 4). Russia vs. Ukraine: An Economic Comparison. Nasdaq.
+|   https://www.nasdaq.com/articles/russia-vs.-ukraine%3A-an-economic-comparison 
