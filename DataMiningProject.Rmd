@@ -1,12 +1,13 @@
 ---
-title: 'Data Mining Project: Assessing National Economic Characteristics'
+title: 'Data Mining Project: National Economic Characteristics and Democracy'
 author: "Derek Wagner"
-date: "11/18/2023"
+date: "11/19/2023"
 output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+# Libraries
 library(tidyverse)
 library(openxlsx)
 library(ggplot2)
@@ -33,6 +34,8 @@ The aim of this paper is to begin an investigation into the preconditions of dem
 Two sources of economic indicator data are used in this analysis. The first is the World Bank Global Economic Monitor (GEM). The GEM dataset contains information about exchange rates, GDP, unemployment, consumer price indexes (CPI), stock markets, and other economic indicators for independent states. However, the GEM dataset has a high number of missing values. Data imputation will be used in this report to remedy the missing value problem, and the success of imputation will be assessed. Data from 2013 is the most complete in the dataset, so the analysis will focus only on 2013 GEM data. The data used in this study were downloaded from Kaggle.
 
 The second source of data is the International Monetary Fund (IMF) World Economic Outlook Database (WEO). The WEO dataset has similar predictors as the GEM dataset, though it has inflation rate and population data absent in the GEM dataset and lacks information about stocks and CPI. A strength of this dataset relative to the GEM dataset is the relative lack of missing values. Data from 2020 is used to maximize completeness. The data used in this study were downloaded from the IMF website.
+
+In both the IMF and World Bank datasets, data from major developed economies (e.g. USA, NATO countries, Japan, Israel, South Korea, Singapore, and Australia) are omitted. These omissions provide an opportunity to assess the relationships between economic factors and democracy without the possibly confounding influence of the system of Western and Western-aligned relationships.
 
 For the "Government" response variable, official government structure was considered first. However, as many authoritarian states are "officially" republics with democratic institutions, it was determined that official government structure was merely nominal and would not provide sufficient information about the presence of democracy in a country. Instead, the Freedom House "Global Freedom Score" was chosen as the response variable. Freedom House is a non-governmental organization that advocates for democratic governance worldwide and tracks indicators of democracy by country. The Global Freedom Score is Freedom House's index of how free and democratic each country is. A potential validity concern is the subjectivity with which a pro-democracy, Western organization may judge the democratic merits of assessed states; however, given the preceding discussion of democratic peace theory, it would be consistent to use the definition of democracy given by advocates of democracy for this analysis.
 
@@ -172,6 +175,7 @@ df_wb_imputed = data.frame(
 ```
 
 ```{r eval=F, echo=F}
+# Saved off imputed dataset to be read in separately since imputation took some time
 df_wb_imputed['Country'] = rownames(df_wb)
 df_wb_imputed = df_wb_imputed%>%left_join(countries_key, by=c("Country"="World_Bank"))%>%
   filter(Government!="")
@@ -179,8 +183,19 @@ write.csv(df_wb_imputed,"C:/Users/wagnedg1/Documents/EP/df_imputed_wGov.csv")
 ```
 
 ```{r echo=F}
+# Read imputed dataset back in
 df_wb_imp = read.csv("C:/Users/wagnedg1/Documents/EP/df_imputed_wGov.csv")
 df_wb_imp = df_wb_imp%>%select(-c( IMF, X))%>%rename("World_Bank"="Country")
+```
+
+```{r echo=F, results='hide', eval=F}
+# Plot to demonstrate imputation in presentation
+ggplot()+
+  geom_density(aes(x=na.omit(df_wb$Core_CPI)))+
+  xlab("Core CPI")+ylab("Density")
+ggplot()+
+  geom_density(aes(x=na.omit(df_wb_imp$Core_CPI)))+
+  xlab("Core CPI (with Imputation)")+ylab("Density")
 ```
 
 
@@ -202,14 +217,21 @@ The results of *k*-means clustering are presented using principal components ana
 The figure below shows three clusters calculated for the World Bank data plotted by the first two principal components, which together account for 36.4% of the variability of the data. Clusters 1 and 3 demonstrate no overlap, while there is some minor overlap between clusters 2 and 3. Clustering with $>3$ clusters led to high overlap between clusters, so $k=3$ is selected as optimal. This is convenient, as Freedom House also uses three groups.
 
 ```{r echo=F, message=F}
+# K-Means Clustering
+
+# Read in imputed data again for just this application
 df_wb_clustering = read.csv("C:/Users/wagnedg1/Documents/EP/df_imputed_wGov.csv")
 df_wb_clustering = df_wb_clustering%>%select(-c(IMF,X))
+# Scale features
 df_wb_clustering_scaled = scale(df_wb_clustering%>%
                               select(-c(Government, Country))%>%
                               mutate_if(is.character, as.numeric))
 rownames(df_wb_clustering_scaled) <- df_wb_clustering[,12]
+# Clustering function
 wb_clusters = kmeans(df_wb_clustering_scaled, centers = 3, nstart = 100)
+# Cluster plot
 fviz_cluster(wb_clusters, data = df_wb_clustering_scaled, geom="point", main="Clusters for World Bank Data")
+# Add cluster labels to dataset
 df_wb_clustering_scaled = as.data.frame(df_wb_clustering_scaled)%>%
   mutate(cluster = as.vector(wb_clusters$cluster))
 ```
@@ -217,6 +239,8 @@ df_wb_clustering_scaled = as.data.frame(df_wb_clustering_scaled)%>%
 However, the tables below show that the states are not grouped by governance type.
 
 ```{r echo=F, warning=F, message=F}
+# Clustering tables for World Bank
+
 df_wb_clustering_scaled['Country'] = rownames(df_wb_clustering_scaled)
 df_wb_clusters = df_wb_clustering_scaled%>%select(Country, cluster)
 df_wb_clusters['Government'] = df_wb_clustering['Government']
@@ -228,22 +252,24 @@ kable(df_wb_clusters%>%filter(cluster==3)%>%pivot_wider(names_from="cluster",val
   kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
 ```
 
-Clusters 1 and 3 do have outsized proportions of "Not Free" states, while Cluster 2 is relatively evenly distributed. Nevertheless, it does not appear like unsupervised methods alone will be able to sort states the way that Freedom House does. However, the possibility of economic indicators being able to predict governance type will not be abandoned yet, as supervised methods will be tried. First, however, *k*-means clustering is used on the IMF data.
+Clusters 1 and 2 do have outsized proportions of "Not Free" states, while Cluster 3 is relatively evenly distributed. Nevertheless, it does not appear like unsupervised methods alone will be able to sort states the way that Freedom House does. However, the possibility of economic indicators being able to predict governance type will not be abandoned yet, as supervised methods will be tried. First, however, *k*-means clustering is used on the IMF data.
 
 ### IMF Data
 
 Attempting *k=3*-means clustering with the IMF data immediately shows the evidence of the outlier issues identified during data pre-processing. The figure below shows two clusters located very close to one another with a third, one-country cluster in the bottom-right.
 
 ```{r echo=F}
+# K-means Clustering for IMF
 df_imf_clustering = data.frame(na.omit(df_imf%>%filter(Year==2020)%>%
   select(-c(Year, World_Bank)))%>%
   filter(Population!="n/a"))
+# Data Scaling
 df_imf_clustering_scaled = scale(df_imf_clustering%>%
                               select(-c(Government, Country))%>%
                               mutate_if(is.character, as.numeric))
 rownames(df_imf_clustering_scaled) <- df_imf_clustering[,1]
 imf_clusters = kmeans(df_imf_clustering_scaled, centers = 3, nstart = 100)
-fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point")
+fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point", main="Clusters for IMF Data")
 ```
 
 The only country in the lonely cluster is Brazil, which is a clear outlier compared to the rest of the dataset. Thus, the clustering is re-run with Brazil excluded:
@@ -257,7 +283,7 @@ df_imf_clustering_scaled = scale(df_imf_clustering%>%
                               mutate_if(is.character, as.numeric))
 rownames(df_imf_clustering_scaled) <- df_imf_clustering[,1]
 imf_clusters = kmeans(df_imf_clustering_scaled, centers = 3, nstart = 100)
-fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point")
+fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point", main="Clusters for IMF Data")
 ```
 
 Again, an outlier appears; this time, it is Ukraine. This occurs one more time as well (not shown) with Moldova, and then a small outlier cluster of Tajikistan, Yemen, Guinea, and the Democratic Republic of the Congo also shows disruptive outlier characteristics. Clustering is run one final time with all of these states excluded:
@@ -273,7 +299,7 @@ df_imf_clustering_scaled = scale(df_imf_clustering%>%
                               mutate_if(is.character, as.numeric))
 rownames(df_imf_clustering_scaled) <- df_imf_clustering[,1]
 imf_clusters = kmeans(df_imf_clustering_scaled, centers = 3, nstart = 100)
-fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point")
+fviz_cluster(imf_clusters, data = df_imf_clustering_scaled, geom="point", main="Clusters for IMF Data, Outliers Removed")
 ```
 
 The new clusters are more well-defined. The tables below show the distribution of governance types by cluster:
@@ -281,6 +307,7 @@ The new clusters are more well-defined. The tables below show the distribution o
 \newpage
 
 ```{r echo=F, warning=F, message=F}
+# Clustering tables for IMF
 df_imf_clustering_scaled = as.data.frame(df_imf_clustering_scaled)
 df_imf_clustering_scaled['Country'] = rownames(df_imf_clustering_scaled)
 df_imf_clusters = df_imf_clustering_scaled%>%select(Country)%>%mutate(cluster = as.vector(imf_clusters$cluster))
@@ -293,7 +320,7 @@ kable(df_imf_clusters%>%filter(cluster==3)%>%pivot_wider(names_from="cluster",va
   kable_styling(latex_options="scale_down") %>% column_spec(2, width = "30em")
 ```
 
-With the IMF data, considerably more success is seen in sorting the countries by governance type than with the World Bank data. 50% of countries in cluster 1 are "Free"; 43% of countries in Cluster 2 are "Not Free", and 85% are either "Not Free" or "Partly Free"; and three of the five countries in Cluster 3 are "Not Free". While this success rate is not thrilling, it shows that the Freedom House governance types are surely associated with the IMF economic indicators to some extent.
+With the IMF data, considerably more success is seen in sorting the countries by governance type than with the World Bank data. 50% of countries in cluster 2 are "Free"; 43% of countries in Cluster 1 are "Not Free", and 85% are either "Not Free" or "Partly Free"; and three of the five countries in Cluster 3 are "Not Free". While this success rate is not thrilling, it shows that the Freedom House governance types are surely associated with the IMF economic indicators to some extent.
 
 \newpage
 
@@ -346,12 +373,14 @@ df_test_wb   <- df_wb_imp_scaled[!sample, ]
 ```
 
 ```{r echo=F}
+# KNN classifier built
 classifier_knn <- knn(train = df_train_wb%>%select(-c(Government, World_Bank)), 
                       test = df_test_wb%>%select(-c(Government, World_Bank)), 
                       cl = df_train_wb$Government, 
                       k = 5) 
 ```
 ```{r echo=F}
+# Add predictions to data table
 df_test_preds = df_test_wb%>%
   mutate(prediction = classifier_knn)%>%
   mutate(correct = case_when(
@@ -359,6 +388,7 @@ df_test_preds = df_test_wb%>%
     prediction != Government ~ 0
   ))
 
+# Confusion matrix and performance metrics
 confusion_mat = confusionMatrix(data=classifier_knn, reference=factor(df_test_wb$Government))
 confusion_mat
 ```
@@ -370,11 +400,13 @@ From the confusion matrix and performance metrics, it is observed that the "Not 
 Attention now turns to using KNN for the IMF data. The same outlier states omitted from *k*-means clustering are omitted here as well. The optimal $K$ is found to be $K=20$. The confusion matrix and performance metrics are reported below.
 
 ```{r echo=F}
+# Subset of IMF data used for supervised learning
 df_imf_2020 = data.frame(na.omit(df_imf%>%filter(Year==2020)%>%filter(!Country%in%c("Brazil","Ukraine","Moldova",
                                                                                           "Democratic Republic of the Congo",
                                                                                           "Tajikistan","Yemen","Guinea"))%>%
   select(-c(Year, World_Bank)))%>%
   filter(Population!="n/a"))
+# Scale data
 df_imf_2020_scaled = scale(df_imf_clustering%>%
                               select(-c(Government, Country))%>%
                               mutate_if(is.character, as.numeric))
@@ -391,6 +423,7 @@ df_test_imf   <- df_imf_2020_scaled[!sample, ]
 ```
 
 ```{r echo=F}
+# KNN classifier built
 set.seed(1)
 classifier_knn <- knn(train = df_train_imf%>%select(-Government), 
                       test = df_test_imf%>%select(-Government), 
@@ -428,8 +461,10 @@ The estimated effect of a predictor on the response can be quantified by the odd
 The odds ratios and associated 95% confidence intervals for ordered logistic regression on the imputed World Bank data are below.
 
 ```{r echo=F, message=F}
+# SEt "Government" as type 'factor'
 df_train_wb$Government = factor(df_train_wb$Government, levels=c("Free","Partly Free","Not Free"))
 df_test_wb$Government = factor(df_test_wb$Government, levels=c("Free","Partly Free","Not Free"))
+# Ordered Logistic Regression function
 m_wb <- MASS::polr(Government~., data = df_train_wb%>%dplyr::select(-World_Bank), Hess=TRUE)
 ## OR and CI
 ci <- confint(m_wb) # default method gives profiled CIs
@@ -499,6 +534,7 @@ For this part of the study, 5-fold cross-validation was used to identify the opt
 
 ```{r echo=F, results='hide'}
 df_wb_imp_xgboost = df_wb_imp_scaled%>%dplyr::select(-World_Bank)
+# Make "Government" labels numeric
 df_wb_imp_xgboost$Government[df_wb_imp_xgboost$Government=="Free"] = 2
 df_wb_imp_xgboost$Government[df_wb_imp_xgboost$Government=="Partly Free"] = 1
 df_wb_imp_xgboost$Government[df_wb_imp_xgboost$Government=="Not Free"] = 0
@@ -520,8 +556,10 @@ test_matrix <- xgb.DMatrix(data = test_data, label = test_label)
 ```
 
 ```{r echo=F, results='hide'}
+set.seed(1)
 numClasses = length(unique(df_wb_imp_xgboost$Government))
 
+# Cross-validation for XGBoost
 cv_model <- xgb.cv(params = list(
   "objective" = "multi:softprob",
   "eval_metric" = "mlogloss",
@@ -536,6 +574,7 @@ cv_model <- xgb.cv(params = list(
 ```
 
 ```{r, echo=F, results='hide'}
+# Get out-of-fold predictions
 OOF_prediction <- data.frame(cv_model$pred) %>%
   mutate(max_prob = max.col(., ties.method = "last"),
          label = train_label + 1)
@@ -555,6 +594,8 @@ confusionMatrix(factor(OOF_prediction$max_prob),
 ```
 
 ```{r echo=F}
+set.seed(1)
+# Optimal model parameters as found by CV
 opt_model = xgb.train(params = list(
   "objective" = "multi:softprob",
   "eval_metric" = "mlogloss",
@@ -577,7 +618,7 @@ confusionMatrix(factor(test_prediction$max_prob),
                 mode = "everything")
 ```
 
-Unfortunately, the performance of the XGBoost method for the World Bank data is not as good as that of the ordered logistic regression. The overall accuracy is only 0.4348, and positive predictive value and sensitivity are not high for any classes. It is most likely that the ordered logistic regression's specific suitability for ordinal classes is why it performed well when the usually-strong XGBoost method failed to do so.
+Unfortunately, the performance of the XGBoost method for the World Bank data is not as good as that of the ordered logistic regression. The overall accuracy is only 0.5000, and positive predictive value and sensitivity are not particularly high for any classes. It is most likely that the ordered logistic regression's specific suitability for ordinal classes is why it performed well when the usually-strong XGBoost method failed to do so.
 
 ### IMF Data
 
@@ -608,6 +649,7 @@ test_matrix <- xgb.DMatrix(data = test_data, label = test_label)
 ```
 
 ```{r echo=F, results='hide'}
+set.seed(1)
 numClasses = length(unique(df_imf$Government))
 
 cv_model <- xgb.cv(params = list(
@@ -645,9 +687,10 @@ confusionMatrix(factor(OOF_prediction$max_prob),
 
 The results of cross-validation are consistent with the results of the *k*-means clustering from earlier in this report. The XGBoost model succeeded in classifying most of the "Free" countries, while it struggled to discriminate between "Partly Free" and "Not Free" countries. This corroborates the results of *k*-means clustering, where most of the "Free" countries were grouped into one cluster but another cluster had large numbers of both "Partly Free" and "Not Free" countries. 
 
-However, when the optimal model parameters are selected based on cross-validation and test set predictions are made, the performance (not displayed) is very poor; the accuracy is 0.3333, which is less than the no-information rate. XGBoost unfortunately did not work well for the IMF data, following the pattern of KNN and ordered logistic regression.
+However, when the optimal model parameters are selected based on cross-validation and test set predictions are made, the performance (not displayed) is very poor; the accuracy is 0.3889, which is almost equal to the no-information rate. XGBoost unfortunately did not work well for the IMF data, following the pattern of KNN and ordered logistic regression.
 
 ```{r echo=F, results='hide'}
+set.seed(1)
 opt_model = xgb.train(params = list(
   "objective" = "multi:softprob",
   "eval_metric" = "mlogloss",
